@@ -302,151 +302,10 @@ function doPost(e) {
       case "get_admin_users": return jsonRes(getAdminUsers(data));
       case "get_bio_link": return jsonRes(getBioLink(data));
       case "get_quota_status": return jsonRes({ status: "success", data: checkQuota() });
-      case "check_system_health": return jsonRes(checkSystemHealth());
-      case "clear_cache": return jsonRes(clearCache());
       default: return jsonRes({ status: "error", message: "Aksi tidak terdaftar: " + (action || "unknown") });
     }
   } catch (err) {
     return jsonRes({ status: "error", message: err.toString() });
-  }
-}
-
-/* =========================
-   MANUAL CACHE CLEARING
-========================= */
-function clearCache() {
-  try {
-    const cache = CacheService.getScriptCache();
-    cache.remove("settings_map");
-    cache.remove("access_rules");
-    return { status: "success", message: "Cache Backend Berhasil Direset!" };
-  } catch (e) {
-    return { status: "error", message: e.toString() };
-  }
-}
-
-/* =========================
-   SYSTEM HEALTH & CONSISTENCY CHECK
-========================= */
-function checkSystemHealth() {
-  try {
-    const report = {
-      status: "healthy",
-      issues: [],
-      checks: {}
-    };
-
-    // 1. Check Product Cache Consistency
-    const rawRules = mustSheet_("Access_Rules").getDataRange().getValues();
-    const cachedRulesJson = CacheService.getScriptCache().get("access_rules");
-    
-    let cacheStatus = "ok";
-    if (cachedRulesJson) {
-      const cachedRules = JSON.parse(cachedRulesJson);
-      // Compare lengths (rawRules has header, so length-1)
-      if (cachedRules.length !== rawRules.length) {
-        cacheStatus = "mismatch";
-        report.status = "warning";
-        report.issues.push("Product Cache Mismatch: Cache (" + cachedRules.length + ") vs Sheet (" + rawRules.length + ")");
-      } else {
-        // Deep compare last item to ensure freshness
-        const lastRaw = rawRules[rawRules.length-1].join("|");
-        const lastCached = cachedRules[cachedRules.length-1].join("|");
-        if (lastRaw !== lastCached) {
-           cacheStatus = "stale";
-           report.status = "warning";
-           report.issues.push("Product Cache Stale: Data content differs.");
-        }
-      }
-    } else {
-      cacheStatus = "empty (clean)";
-    }
-    report.checks.product_cache = cacheStatus;
-
-    // 2. Check Active Products Count
-    let activeCount = 0;
-    for (let i = 1; i < rawRules.length; i++) {
-      if (String(rawRules[i][5]).trim() === "Active") activeCount++;
-    }
-    report.checks.active_products = activeCount;
-
-    // 3. Quota Check
-    const quota = checkQuota();
-    if (quota.email_quota < 10) {
-      report.status = "critical";
-      report.issues.push("Email Quota Critical: " + quota.email_quota);
-    }
-
-    // 4. Run Data Consistency Tests
-    const testResults = runDataConsistencyTests();
-    if (testResults.status === "error") {
-      report.status = report.status === "critical" ? "critical" : "warning";
-      report.issues.push(...testResults.errors);
-    }
-    report.checks.data_consistency = testResults.status;
-
-    return { status: "success", data: report };
-  } catch (e) {
-    return { status: "error", message: e.toString() };
-  }
-}
-
-/**
- * UNIT TESTS: Data Consistency Between Admin and Dashboard
- * Ensures both views see the same core data (minus filters).
- */
-function runDataConsistencyTests() {
-  const errors = [];
-  try {
-    const cfg = getSettingsMap_();
-    
-    // Test 1: getAdminData vs Raw Sheet
-    const adminRes = getAdminData(cfg);
-    const rawRules = mustSheet_("Access_Rules").getDataRange().getValues();
-    const sheetCount = rawRules.length - 1; // exclude header
-    
-    if (adminRes.status === "success") {
-      if (adminRes.products.length !== sheetCount) {
-        errors.push(`Mismatch Admin vs Sheet: Admin sees ${adminRes.products.length} products, Sheet has ${sheetCount}.`);
-      }
-    } else {
-      errors.push("Failed to call getAdminData for testing.");
-    }
-
-    // Test 2: getProducts (Active only) vs Filtered Raw Sheet
-    const dashboardRes = getProducts({ action: "get_products" }, cfg);
-    let activeSheetCount = 0;
-    for (let i = 1; i < rawRules.length; i++) {
-      if (String(rawRules[i][5]).trim() === "Active") activeSheetCount++;
-    }
-
-    if (dashboardRes.status === "success") {
-      if (dashboardRes.data.length !== activeSheetCount) {
-        errors.push(`Mismatch Dashboard vs Sheet: Dashboard sees ${dashboardRes.data.length} active products, Sheet has ${activeSheetCount}.`);
-      }
-    } else {
-      errors.push("Failed to call getProducts for testing.");
-    }
-
-    // Test 3: Data Integrity (Check required columns)
-    if (adminRes.status === "success" && adminRes.products.length > 0) {
-       const firstProd = adminRes.products[0];
-       // Check if required indices exist (based on renderAdminUI mapping)
-       // ID [0], Title [1], Desc [2], Price [4], Status [5]
-       const requiredIndices = [0, 1, 2, 4, 5];
-       requiredIndices.forEach(idx => {
-         if (firstProd[idx] === undefined) {
-           errors.push(`Data Integrity Error: Column index ${idx} missing in product data.`);
-         }
-       });
-    }
-
-    return {
-      status: errors.length > 0 ? "error" : "success",
-      errors: errors
-    };
-  } catch (e) {
-    return { status: "error", errors: ["Test Runner Error: " + e.toString()] };
   }
 }
 
@@ -1610,16 +1469,61 @@ function getAllPages(d) {
 }
 
 function adminLogin(d) {
-  const u = mustSheet_("Users").getDataRange().getValues();
-  const e = String(d.email).trim().toLowerCase();
-  for (let i = 1; i < u.length; i++) {
-    if (
-      String(u[i][1]).toLowerCase() === e &&
-      String(u[i][2]) === String(d.password) &&
-      String(u[i][4]).toLowerCase() === "admin"
-    ) return { status: "success", data: { nama: u[i][3] } };
+  try {
+    const email = String((d && d.email) || "").trim().toLowerCase();
+    const password = String((d && d.password) || "");
+
+    if (!email || !password) {
+      return { status: "error", message: "Email dan password wajib diisi." };
+    }
+    if (!isValidEmail_(email)) {
+      return { status: "error", message: "Format email tidak valid." };
+    }
+
+    const u = mustSheet_("Users").getDataRange().getValues();
+    for (let i = 1; i < u.length; i++) {
+      if (String(u[i][1]).trim().toLowerCase() !== email) continue;
+
+      const role = String(u[i][4] || "").trim().toLowerCase();
+      if (role !== "admin") {
+        return { status: "error", message: "Akses ditolak: akun ini bukan admin." };
+      }
+
+      const storedHash = String(u[i][2] || "");
+      const salt = String(u[i][8] || "").trim();
+      if (!verifyPassword_(password, salt, storedHash)) {
+        return { status: "error", message: "Email atau password admin salah." };
+      }
+
+      return { status: "success", data: { nama: String(u[i][3] || "Admin") } };
+    }
+
+    return { status: "error", message: "Email atau password admin salah." };
+  } catch (e) {
+    return { status: "error", message: e.toString() };
   }
-  return { status: "error" };
+}
+
+function testAdminLoginContract() {
+  const cases = [
+    { input: null },
+    { input: {} },
+    { input: { email: "", password: "" } },
+    { input: { email: "not-an-email", password: "x" } },
+    { input: { email: "nonexist@example.com", password: "x" } }
+  ];
+
+  const results = {};
+  cases.forEach((c, idx) => {
+    const r = adminLogin(c.input);
+    const ok = !!(r && r.status === "error" && typeof r.message === "string" && r.message.trim() !== "");
+    results["case_" + (idx + 1)] = ok;
+    if (!ok) Logger.log("FAIL case " + (idx + 1) + ": " + JSON.stringify(r));
+  });
+
+  const pass = Object.values(results).every(Boolean);
+  Logger.log("testAdminLoginContract: " + (pass ? "✅ ALL PASS" : "❌ FAILED") + "\n" + JSON.stringify(results, null, 2));
+  return { pass: pass, results: results };
 }
 
 function getAdminData(cfg) {
