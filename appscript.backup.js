@@ -118,16 +118,7 @@ function checkQuota() {
     url_fetch_status: urlFetchStatus,
     timestamp: new Date().toISOString()
   };
-  
-  // Alert if critical
-  if (emailQuota < 20) {
-    // Cannot send email if quota low, log to spreadsheet instead
-    const logSheet = ss.getSheetByName("System_Logs");
-    if (logSheet) {
-      logSheet.appendRow([new Date(), "CRITICAL_QUOTA", JSON.stringify(report)]);
-    }
-  }
-  
+
   return report;
 }
 

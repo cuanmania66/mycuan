@@ -77,32 +77,6 @@ function toISODate_() {
 }
 
 /* =========================
-   TRANSACTION LOGGING
-========================= */
-/**
- * Menulis log transaksi ke sheet System_Logs.
- * Dibuat lazy (sheet dibuat jika belum ada).
- * @param {string} action - Nama aksi (e.g. "create_order", "moota_webhook")
- * @param {string} status - "success" | "error" | "info"
- * @param {Object} meta  - Data tambahan (invoice, email, amount, dll)
- */
-function log_(action, status, meta) {
-  try {
-    let logSheet = ss.getSheetByName("System_Logs");
-    if (!logSheet) {
-      logSheet = ss.insertSheet("System_Logs");
-      logSheet.appendRow(["Timestamp", "Action", "Status", "Details"]);
-      logSheet.setFrozenRows(1);
-    }
-    const detail = (typeof meta === "object") ? JSON.stringify(meta) : String(meta || "");
-    logSheet.appendRow([new Date(), action, status, detail]);
-  } catch (e) {
-    // Jangan lempar error dari logger — logging failure tidak boleh break aplikasi utama
-    console.error("Logger Error: " + e.toString());
-  }
-}
-
-/* =========================
    EXTERNAL API WITH RETRY (EXPONENTIAL BACKOFF)
 ========================= */
 /**
@@ -199,16 +173,7 @@ function checkQuota() {
     url_fetch_status: urlFetchStatus,
     timestamp: new Date().toISOString()
   };
-  
-  // Alert if critical
-  if (emailQuota < 20) {
-    // Cannot send email if quota low, log to spreadsheet instead
-    const logSheet = ss.getSheetByName("System_Logs");
-    if (logSheet) {
-      logSheet.appendRow([new Date(), "CRITICAL_QUOTA", JSON.stringify(report)]);
-    }
-  }
-  
+
   return report;
 }
 
@@ -591,7 +556,6 @@ function sendWA(target, message, cfg) {
     });
   } catch (e) {
     Logger.log("sendWA Error: " + e.toString());
-    log_("send_wa", "error", { target: target, error: e.toString() });
   }
 }
 
@@ -708,16 +672,6 @@ function createOrder(d, cfg) {
       aff,
       komisiNominal
     ]);
-
-    // LOG TRANSAKSI ke System_Logs
-    log_("create_order", "success", {
-      invoice: inv,
-      email: email,
-      produk: produkNameSanitized,
-      harga: hargaTotalUnik,
-      status: orderStatus,
-      affiliate: aff
-    });
 
     // ==========================================
     // NOTIFIKASI (LOGIC CABANG: GRATIS vs BAYAR)
@@ -1293,7 +1247,6 @@ function migratePasswords() {
     migratedCount++;
   }
 
-  log_("migrate_passwords", "success", { migrated: migratedCount, skipped: skippedCount });
   Logger.log("Migration selesai: " + migratedCount + " di-hash, " + skippedCount + " dilewati.");
   return { status: "success", migrated: migratedCount, skipped: skippedCount };
 }
@@ -1596,7 +1549,6 @@ function loginUser(d) {
         const token = generateSessionToken_();
         storeSession_(e, token);
 
-        log_("login", "success", { email: e });
         return {
           status: "success",
           session_token: token,
@@ -1605,7 +1557,6 @@ function loginUser(d) {
       }
     }
   }
-  log_("login", "error", { email: e, reason: "invalid_credentials" });
   return { status: "error", message: "Gagal Login: Cek kembali email/password" };
 }
 
@@ -1947,7 +1898,6 @@ function changeUserPassword(d) {
         s.getRange(i + 1, 3).setValue(newHash);
         s.getRange(i + 1, 9).setValue(newSalt);
 
-        log_("change_password", "success", { email: email });
         return { status: "success", message: "Password berhasil diubah" };
       }
     }
@@ -2494,7 +2444,6 @@ function forgotPassword(d) {
 
     // RATE LIMIT CHECK: Maks 3 permintaan per jam per email
     if (!checkRateLimit_(email)) {
-      log_("forgot_password", "rate_limited", { email: email });
       return {
         status: "error",
         message: "Terlalu banyak percobaan reset password. Silakan coba lagi dalam 1 jam."
@@ -2560,11 +2509,9 @@ function forgotPassword(d) {
     </div>`;
     sendEmail(email, `[${siteName}] Reset Password`, emailHtml, cfg);
 
-    log_("forgot_password", "success", { email: email });
     return { status: "success", message: "Jika email terdaftar, instruksi reset akan dikirim via WhatsApp/Email." };
 
   } catch (e) {
-    log_("forgot_password", "error", { error: e.toString() });
     return { status: "error", message: e.toString() };
   }
 }
